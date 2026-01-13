@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TransLink Realtime (Stop Name + Route)</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0b1020;
+      --panel: rgba(255,255,255,0.06);
+      --text: rgba(255,255,255,0.92);
+      --muted: rgba(255,255,255,0.72);
+      --border: rgba(255,255,255,0.12);
+      --accent: #7dd3fc;
+      --danger: #fb7185;
+      --ok: #34d399;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      background: radial-gradient(1200px 600px at 20% 0%, rgba(125,211,252,0.18), transparent 60%),
+                  radial-gradient(900px 500px at 90% 10%, rgba(52,211,153,0.12), transparent 60%),
+                  var(--bg);
+      color: var(--text);
+    }
+
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 28px 18px 60px;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 18px;
+      margin-bottom: 16px;
+    }
+
+    h1 {
+      font-size: 18px;
+      margin: 0;
+      letter-spacing: 0.2px;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+
+    @media (min-width: 900px) {
+      .grid {
+        grid-template-columns: 1.05fr 0.95fr;
+        align-items: start;
+      }
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      backdrop-filter: blur(10px);
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin: 10px 0 6px;
+    }
+
+    input, select, button {
+      font: inherit;
+    }
+
+    input, select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,0.25);
+      color: var(--text);
+      outline: none;
+    }
+
+    input:focus, select:focus {
+      border-color: rgba(125, 211, 252, 0.55);
+      box-shadow: 0 0 0 3px rgba(125,211,252,0.16);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 160px;
+      gap: 10px;
+    }
+
+    .btnrow {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(125, 211, 252, 0.14);
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: rgba(125, 211, 252, 0.55);
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .pill {
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--muted);
+      min-height: 16px;
+      white-space: pre-wrap;
+    }
+
+    .status .ok { color: var(--ok); }
+    .status .bad { color: var(--danger); }
+
+    .mono {
+      font-family: var(--mono);
+    }
+
+    .results {
+      display: grid;
+      gap: 10px;
+    }
+
+    .kvs {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 6px 12px;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .kvs div:nth-child(odd) {
+      color: var(--muted);
+    }
+
+    .list {
+      margin: 8px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 8px;
+    }
+
+    .list li {
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,0.22);
+    }
+
+    .list .top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .list .muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    footer {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>TransLink Realtime (Stop Name + Route)</h1>
+        <div class="hint">
+          Searches stop names, filters to stops that serve your route, then shows realtime departures.
+        </div>
+      </div>
+      <div class="pill" title="Uses TransLink public GTFS APIs">
+        <span>API:</span>
+        <span class="mono">getaway.translink.ca</span>
+      </div>
+    </header>
+
+    <div class="grid">
+      <section class="card">
+        <div class="row">
+          <div>
+            <label for="stopSpec">Stop (name or stop ID)</label>
+            <input id="stopSpec" placeholder="e.g. Westbound Yew or 60574" autocomplete="off" />
+          </div>
+          <div>
+            <label for="routeNo">Route #</label>
+            <input id="routeNo" placeholder="e.g. 7" autocomplete="off" />
+          </div>
+        </div>
+
+        <div class="btnrow">
+          <button id="searchBtn">Search stops</button>
+          <button id="realtimeBtn" disabled>Get realtime</button>
+          <button id="clearBtn" type="button">Clear</button>
+        </div>
+
+        <div class="status" id="status"></div>
+
+        <label for="stopSelect">Matching stops</label>
+        <select id="stopSelect" size="10"></select>
+
+        <footer>
+          Tip: Try 2 words like <span class="mono">Westbound Yew</span>. Filtering uses route service at the stop.
+        </footer>
+      </section>
+
+      <section class="card results">
+        <div class="kvs" id="info"></div>
+        <ul class="list" id="departures"></ul>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    // Metro Vancouver bounds used by TransLink's own Next Bus UI.
+    // Source: https://www.translink.ca/js/gtfsHelpers.mjs
+    const GVTA = {
+      north: 49.47671,
+      west: -123.43833,
+      south: 49.0,
+      east: -122.30006,
+    };
+
+    const STOP_CACHE_KEY = "translink_gtfs_stops_cache_v1";
+    const STOP_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+    const stopSpecEl = document.getElementById("stopSpec");
+    const routeNoEl = document.getElementById("routeNo");
+    const searchBtn = document.getElementById("searchBtn");
+    const realtimeBtn = document.getElementById("realtimeBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const stopSelectEl = document.getElementById("stopSelect");
+    const statusEl = document.getElementById("status");
+    const infoEl = document.getElementById("info");
+    const departuresEl = document.getElementById("departures");
+
+    const routeCache = new Map(); // stopId -> routes array
+
+    function setStatus(message, kind = "") {
+      statusEl.innerHTML = "";
+      if (!message) return;
+      const span = document.createElement("span");
+      if (kind === "ok") span.className = "ok";
+      if (kind === "bad") span.className = "bad";
+      span.textContent = message;
+      statusEl.appendChild(span);
+    }
+
+    function isStopId(value) {
+      return /^\d+$/.test((value || "").trim());
+    }
+
+    function tokenizeQuery(value) {
+      const tokens = (value || "")
+        .toLowerCase()
+        .split(/\s+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length > 1);
+      return Array.from(new Set(tokens));
+    }
+
+    async function fetchJson(url) {
+      const response = await fetch(url, {
+        headers: {
+          accept: "application/json",
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} for ${url}`);
+      }
+      return response.json();
+    }
+
+    function loadStopsCache() {
+      try {
+        const raw = localStorage.getItem(STOP_CACHE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || !parsed.ts || !parsed.data) return null;
+        if (Date.now() - parsed.ts > STOP_CACHE_TTL_MS) return null;
+        return parsed.data;
+      } catch {
+        return null;
+      }
+    }
+
+    function saveStopsCache(stops) {
+      try {
+        localStorage.setItem(
+          STOP_CACHE_KEY,
+          JSON.stringify({ ts: Date.now(), data: stops })
+        );
+      } catch {
+        // ignore quota / privacy mode
+      }
+    }
+
+    async function getStops() {
+      const cached = loadStopsCache();
+      if (cached) return cached;
+
+      const url = `https://getaway.translink.ca/api/gtfs/stops/${GVTA.north},${GVTA.west}/${GVTA.south},${GVTA.east}`;
+      setStatus("Downloading stop list (cached for 24h)...");
+      const data = await fetchJson(url);
+      saveStopsCache(data);
+      return data;
+    }
+
+    async function getRoutesForStop(stopId) {
+      if (routeCache.has(stopId)) return routeCache.get(stopId);
+      const url = `https://getaway.translink.ca/api/gtfs/stop/${encodeURIComponent(stopId)}/routes`;
+      const routes = await fetchJson(url);
+      routeCache.set(stopId, routes);
+      return routes;
+    }
+
+    async function stopHasRoute(stopId, routeNoLower) {
+      const routes = await getRoutesForStop(stopId);
+      return Array.isArray(routes) && routes.some((r) => (r?.rs || "").toLowerCase() === routeNoLower);
+    }
+
+    async function filterByRouteWithConcurrency(stops, routeNoLower, onProgress) {
+      const concurrency = 8;
+      const results = [];
+      let index = 0;
+      let done = 0;
+
+      async function worker() {
+        while (true) {
+          const current = index++;
+          if (current >= stops.length) return;
+
+          const stop = stops[current];
+          const stopId = stop.sc;
+
+          try {
+            const ok = await stopHasRoute(stopId, routeNoLower);
+            if (ok) results.push(stop);
+          } catch {
+            // If this call fails, keep the stop so users can still pick.
+            results.push(stop);
+          } finally {
+            done++;
+            onProgress?.(done);
+          }
+        }
+      }
+
+      const workers = Array.from({ length: Math.min(concurrency, stops.length) }, () => worker());
+      await Promise.all(workers);
+
+      // Preserve original order for stability
+      const keepIds = new Set(results.map((s) => s.sc));
+      return stops.filter((s) => keepIds.has(s.sc));
+    }
+
+    function clearResults() {
+      infoEl.innerHTML = "";
+      departuresEl.innerHTML = "";
+    }
+
+    function setInfoRows(rows) {
+      infoEl.innerHTML = "";
+      for (const [k, v] of rows) {
+        const kEl = document.createElement("div");
+        kEl.textContent = k;
+        const vEl = document.createElement("div");
+        vEl.textContent = v;
+        infoEl.appendChild(kEl);
+        infoEl.appendChild(vEl);
+      }
+    }
+
+    function renderStopOptions(stops) {
+      stopSelectEl.innerHTML = "";
+      for (const s of stops) {
+        const opt = document.createElement("option");
+        opt.value = s.sc;
+        opt.textContent = `${s.sc} — ${s.sn}`;
+        stopSelectEl.appendChild(opt);
+      }
+      realtimeBtn.disabled = stopSelectEl.options.length === 0;
+      if (stopSelectEl.options.length === 1) {
+        stopSelectEl.selectedIndex = 0;
+      }
+    }
+
+    async function searchStops() {
+      clearResults();
+      realtimeBtn.disabled = true;
+
+      const stopSpec = stopSpecEl.value.trim();
+      const routeNo = routeNoEl.value.trim();
+
+      if (!stopSpec || !routeNo) {
+        setStatus("Enter both stop (name or ID) and route #.", "bad");
+        return;
+      }
+
+      if (isStopId(stopSpec)) {
+        setStatus(`Using stop ID ${stopSpec}.`, "ok");
+        renderStopOptions([{ sc: stopSpec, sn: "(manual stop ID)", la: null, lo: null }]);
+        return;
+      }
+
+      const tokens = tokenizeQuery(stopSpec);
+      if (tokens.length === 0) {
+        setStatus("Type at least 2 characters for stop name.", "bad");
+        return;
+      }
+
+      const routeNoLower = routeNo.toLowerCase();
+
+      const allStops = await getStops();
+      const nameMatches = allStops
+        .filter((s) => {
+          const sn = (s?.sn || "").toLowerCase();
+          return tokens.every((t) => sn.includes(t));
+        })
+        .sort((a, b) => (a.sn || "").localeCompare(b.sn || ""));
+
+      if (nameMatches.length === 0) {
+        setStatus(`No stop names match “${stopSpec}”.`, "bad");
+        renderStopOptions([]);
+        return;
+      }
+
+      // Cap how many we route-check to keep it responsive.
+      const maxToCheck = 40;
+      const toCheck = nameMatches.slice(0, maxToCheck);
+
+      setStatus(`Found ${nameMatches.length} name matches. Checking route ${routeNo} for up to ${toCheck.length} stops...`);
+      let lastShown = 0;
+
+      const filtered = await filterByRouteWithConcurrency(toCheck, routeNoLower, (done) => {
+        // update at ~10% increments
+        const pct = Math.floor((done / toCheck.length) * 100);
+        if (pct - lastShown >= 10 || done === toCheck.length) {
+          lastShown = pct;
+          setStatus(`Route-checking… ${done}/${toCheck.length} (${pct}%)`);
+        }
+      });
+
+      // If filtering produces nothing, show unfiltered list (but keep it capped).
+      if (filtered.length === 0) {
+        setStatus(`No matches verified on route ${routeNo}. Showing name matches (first ${toCheck.length}).`, "bad");
+        renderStopOptions(toCheck);
+        return;
+      }
+
+      setStatus(`Filtered to ${filtered.length} stop(s) serving route ${routeNo}.`, "ok");
+      renderStopOptions(filtered);
+    }
+
+    async function getRealtime() {
+      clearResults();
+
+      const routeNo = routeNoEl.value.trim();
+      const selectedStopId = stopSelectEl.value;
+      if (!routeNo || !selectedStopId) {
+        setStatus("Pick a stop and enter a route #.", "bad");
+        return;
+      }
+
+      const url = `https://getaway.translink.ca/api/gtfs/stop/${encodeURIComponent(selectedStopId)}/route/${encodeURIComponent(routeNo)}/realtimeschedules?querySize=6`;
+
+      setStatus(`Fetching realtime for stop ${selectedStopId}, route ${routeNo}...`);
+      const json = await fetchJson(url);
+
+      if (!Array.isArray(json) || json.length === 0) {
+        setStatus("No realtime data for this stop/route.", "bad");
+        return;
+      }
+
+      const stop = json[0];
+      const route = stop?.r?.[0];
+      const trips = route?.t || [];
+
+      setInfoRows([
+        ["Stop", stop?.sn || ""],
+        ["Route", `${route?.rs || ""} ${route?.rl || ""}`.trim()],
+        ["Destination", route?.dn || ""],
+      ]);
+
+      departuresEl.innerHTML = "";
+      for (const t of trips) {
+        const li = document.createElement("li");
+
+        const top = document.createElement("div");
+        top.className = "top";
+
+        const left = document.createElement("div");
+        left.textContent = `${t?.th || ""}`;
+
+        const right = document.createElement("div");
+        right.className = "mono";
+        right.textContent = `${t?.dt || ""}`;
+
+        top.appendChild(left);
+        top.appendChild(right);
+
+        const meta = document.createElement("div");
+        meta.className = "muted";
+        const delay = typeof t?.dl === "number" ? `${t.dl}s` : "";
+        const rt = typeof t?.rt === "boolean" ? (t.rt ? "realtime" : "scheduled") : "";
+        meta.textContent = [delay && `delay ${delay}`, rt].filter(Boolean).join(" · ");
+
+        li.appendChild(top);
+        if (meta.textContent) li.appendChild(meta);
+
+        departuresEl.appendChild(li);
+      }
+
+      setStatus("OK", "ok");
+    }
+
+    function clearAll() {
+      stopSpecEl.value = "";
+      routeNoEl.value = "";
+      stopSelectEl.innerHTML = "";
+      realtimeBtn.disabled = true;
+      clearResults();
+      setStatus("");
+    }
+
+    searchBtn.addEventListener("click", () => {
+      searchStops().catch((e) => setStatus(String(e?.message || e), "bad"));
+    });
+
+    realtimeBtn.addEventListener("click", () => {
+      getRealtime().catch((e) => setStatus(String(e?.message || e), "bad"));
+    });
+
+    clearBtn.addEventListener("click", clearAll);
+
+    stopSpecEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") searchBtn.click();
+    });
+
+    routeNoEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") searchBtn.click();
+    });
+  </script>
+</body>
+</html>
