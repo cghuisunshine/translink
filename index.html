@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>TransLink Realtime (Stop Name + Route)</title>
+  <title>TransLink Realtime (Stop / Route / Both)</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -217,9 +217,9 @@
   <div class="wrap">
     <header>
       <div>
-        <h1>TransLink Realtime (Stop Name + Route)</h1>
+        <h1>TransLink Realtime (Stop / Route / Both)</h1>
         <div class="hint">
-          Searches stop names, filters to stops that serve your route, then shows realtime departures.
+          Use either: stop+route (realtime), route-only (list stops + start time), or stop-only (list routes + times).
         </div>
       </div>
       <div class="pill" title="Uses TransLink public GTFS APIs">
@@ -232,18 +232,18 @@
       <section class="card">
         <div class="row">
           <div>
-            <label for="stopSpec">Stop (name or stop ID)</label>
-            <input id="stopSpec" placeholder="e.g. Westbound Yew or 60574" autocomplete="off" />
+          <label for="stopSpec">Stop (name or stop ID)</label>
+          <input id="stopSpec" placeholder="e.g. Westbound Yew or 60574 (leave blank for route-only)" autocomplete="off" />
           </div>
           <div>
             <label for="routeNo">Route #</label>
-            <input id="routeNo" placeholder="e.g. 7" autocomplete="off" />
+            <input id="routeNo" placeholder="e.g. 7 (leave blank for stop-only)" autocomplete="off" />
           </div>
         </div>
 
         <div class="btnrow">
-          <button id="searchBtn">Search stops</button>
-          <button id="realtimeBtn" disabled>Get realtime</button>
+          <button id="searchBtn">Search</button>
+          <button id="realtimeBtn" disabled>Fetch</button>
           <button id="clearBtn" type="button">Clear</button>
         </div>
 
@@ -253,7 +253,7 @@
         <select id="stopSelect" size="10"></select>
 
         <footer>
-          Tip: Try 2 words like <span class="mono">Westbound Yew</span>. Filtering uses route service at the stop.
+          Tip: Try 2+ words like <span class="mono">Westbound Yew</span>. Leave one field blank for single-parameter mode.
         </footer>
       </section>
 
@@ -300,7 +300,21 @@
     }
 
     function isStopId(value) {
-      return /^\d+$/.test((value || "").trim());
+      return /^\d{5}$/.test((value || "").trim());
+    }
+
+    function normalizeRouteForCompare(value) {
+      const raw = (value || "").trim();
+      if (!raw) return "";
+      if (/^\d+$/.test(raw)) return String(parseInt(raw, 10));
+      return raw.toLowerCase();
+    }
+
+    function formatRouteForApi(value) {
+      const raw = (value || "").trim();
+      if (!raw) return "";
+      if (/^\d+$/.test(raw)) return String(parseInt(raw, 10)).padStart(3, "0");
+      return raw.toUpperCase();
     }
 
     function tokenizeQuery(value) {
@@ -367,12 +381,15 @@
       return routes;
     }
 
-    async function stopHasRoute(stopId, routeNoLower) {
+    async function stopHasRoute(stopId, routeNoNormalized) {
       const routes = await getRoutesForStop(stopId);
-      return Array.isArray(routes) && routes.some((r) => (r?.rs || "").toLowerCase() === routeNoLower);
+      return (
+        Array.isArray(routes) &&
+        routes.some((r) => normalizeRouteForCompare(r?.rs || "") === routeNoNormalized)
+      );
     }
 
-    async function filterByRouteWithConcurrency(stops, routeNoLower, onProgress) {
+    async function filterByRouteWithConcurrency(stops, routeNoNormalized, onProgress) {
       const concurrency = 8;
       const results = [];
       let index = 0;
@@ -387,7 +404,7 @@
           const stopId = stop.sc;
 
           try {
-            const ok = await stopHasRoute(stopId, routeNoLower);
+            const ok = await stopHasRoute(stopId, routeNoNormalized);
             if (ok) results.push(stop);
           } catch {
             // If this call fails, keep the stop so users can still pick.
@@ -432,27 +449,238 @@
         opt.textContent = `${s.sc} — ${s.sn}`;
         stopSelectEl.appendChild(opt);
       }
-      realtimeBtn.disabled = stopSelectEl.options.length === 0;
       if (stopSelectEl.options.length === 1) {
         stopSelectEl.selectedIndex = 0;
       }
+      updateButtons();
+    }
+
+    function updateButtons() {
+      const stopSpec = stopSpecEl.value.trim();
+      const routeNo = routeNoEl.value.trim();
+      const hasSelectedStop = Boolean(stopSelectEl.value);
+
+      // Enable realtimeBtn when it can do something useful:
+      // - stop+route (needs selected stop)
+      // - stop-only (needs selected stop)
+      // - route-only (no stop needed)
+      const canFetch =
+        (routeNo && hasSelectedStop) ||
+        (!routeNo && hasSelectedStop) ||
+        (!stopSpec && routeNo);
+
+      realtimeBtn.disabled = !canFetch;
+    }
+
+    async function showRouteStops(routeNo) {
+      clearResults();
+      stopSelectEl.innerHTML = "";
+      updateButtons();
+
+      const routeApi = formatRouteForApi(routeNo);
+      const routeNormalized = normalizeRouteForCompare(routeNo);
+
+      if (!routeApi) {
+        setStatus("Enter a route #.", "bad");
+        return;
+      }
+
+      setStatus(`Fetching stops for route ${routeNo} (both directions)...`);
+
+      const rows = [["Mode", "Route-only"], ["Route", routeNormalized]];
+      const listItems = [];
+
+      for (const dir of [0, 1]) {
+        const stopsUrl = `https://getaway.translink.ca/api/gtfs/route/${encodeURIComponent(routeApi)}/direction/${dir}/stops`;
+        const nextTripUrl = `https://getaway.translink.ca/api/gtfs/route/${encodeURIComponent(routeApi)}/direction/${dir}/nexttrip`;
+
+        let stops = [];
+        let nextTripLocal = "";
+
+        try {
+          stops = await fetchJson(stopsUrl);
+        } catch (e) {
+          rows.push([`Direction ${dir}`, `Failed to fetch stops (${String(e?.message || e)})`]);
+          continue;
+        }
+
+        try {
+          const nextTrip = await fetchJson(nextTripUrl);
+          const unix = nextTrip?.nextTripDateTimeInUnix;
+          if (typeof unix === "number") {
+            nextTripLocal = new Date(unix * 1000).toLocaleString([], {
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+            });
+          }
+        } catch {
+          // optional
+        }
+
+        const first = Array.isArray(stops) && stops.length > 0 ? stops[0] : null;
+        const startText = first ? `${first.sn} (${first.sc})` : "(unknown)";
+        rows.push([`Dir ${dir} start`, nextTripLocal ? `${startText} · next trip ${nextTripLocal}` : startText]);
+
+        if (!Array.isArray(stops) || stops.length === 0) {
+          listItems.push({ header: `Direction ${dir} stops`, detail: "No stops returned." });
+          continue;
+        }
+
+        listItems.push({ header: `Direction ${dir} stops`, detail: `${stops.length} stops` });
+        stops.forEach((s, idx) => {
+          listItems.push({
+            header: `${s?.sn || ""}`,
+            right: `${s?.sc || ""}`,
+            detail: `dir ${dir} · #${idx + 1}`,
+          });
+        });
+      }
+
+      setInfoRows(rows);
+      departuresEl.innerHTML = "";
+
+      for (const item of listItems) {
+        const li = document.createElement("li");
+
+        const top = document.createElement("div");
+        top.className = "top";
+
+        const left = document.createElement("div");
+        left.textContent = item.header || "";
+
+        const right = document.createElement("div");
+        right.className = "mono";
+        right.textContent = item.right || "";
+
+        top.appendChild(left);
+        if (item.right) top.appendChild(right);
+
+        li.appendChild(top);
+
+        if (item.detail) {
+          const meta = document.createElement("div");
+          meta.className = "muted";
+          meta.textContent = item.detail;
+          li.appendChild(meta);
+        }
+
+        departuresEl.appendChild(li);
+      }
+
+      setStatus("OK", "ok");
+    }
+
+    async function showRoutesAtStop(stopId) {
+      clearResults();
+
+      if (!stopId) {
+        setStatus("Pick a stop first.", "bad");
+        return;
+      }
+
+      setStatus(`Fetching routes for stop ${stopId}...`);
+
+      const routes = await getRoutesForStop(stopId);
+      if (!Array.isArray(routes) || routes.length === 0) {
+        setStatus("No routes found for this stop.", "bad");
+        return;
+      }
+
+      setInfoRows([["Mode", "Stop-only"], ["Stop", stopId], ["Routes", String(routes.length)]]);
+      departuresEl.innerHTML = "";
+
+      const concurrency = 5;
+      let idx = 0;
+      let done = 0;
+
+      async function worker() {
+        while (true) {
+          const current = idx++;
+          if (current >= routes.length) return;
+
+          const r = routes[current];
+          const rs = r?.rs || "";
+          const rl = r?.rl || "";
+          const di = r?.di;
+          const dn = r?.dn || "";
+
+          const routeApi = formatRouteForApi(rs);
+          const url = `https://getaway.translink.ca/api/gtfs/stop/${encodeURIComponent(stopId)}/route/${encodeURIComponent(routeApi)}/realtimeschedules?querySize=3`;
+
+          let times = [];
+          let noRealtime = false;
+
+          try {
+            const json = await fetchJson(url);
+            times = json?.[0]?.r?.[0]?.t?.map((t) => t?.dt).filter(Boolean) || [];
+          } catch {
+            noRealtime = true;
+          }
+
+          const li = document.createElement("li");
+
+          const top = document.createElement("div");
+          top.className = "top";
+
+          const left = document.createElement("div");
+          left.textContent = `${rs} ${rl}`.trim() + (dn ? ` (→ ${dn})` : "") + (typeof di === "number" ? ` [dir ${di}]` : "");
+
+          const right = document.createElement("div");
+          right.className = "mono";
+          right.textContent = times.length ? times.join(", ") : "";
+
+          top.appendChild(left);
+          top.appendChild(right);
+
+          li.appendChild(top);
+
+          const meta = document.createElement("div");
+          meta.className = "muted";
+          meta.textContent = noRealtime ? "realtime unavailable" : (times.length ? "" : "no upcoming times");
+          if (meta.textContent) li.appendChild(meta);
+
+          departuresEl.appendChild(li);
+
+          done++;
+          if (done % 5 === 0 || done === routes.length) {
+            setStatus(`Fetching route times… ${done}/${routes.length}`);
+          }
+        }
+      }
+
+      const workers = Array.from({ length: Math.min(concurrency, routes.length) }, () => worker());
+      await Promise.all(workers);
+
+      setStatus("OK", "ok");
     }
 
     async function searchStops() {
       clearResults();
-      realtimeBtn.disabled = true;
+      stopSelectEl.innerHTML = "";
+      updateButtons();
 
       const stopSpec = stopSpecEl.value.trim();
       const routeNo = routeNoEl.value.trim();
 
-      if (!stopSpec || !routeNo) {
-        setStatus("Enter both stop (name or ID) and route #.", "bad");
+      // Route-only mode
+      if (!stopSpec && routeNo) {
+        await showRouteStops(routeNo);
+        return;
+      }
+
+      if (!stopSpec) {
+        setStatus("Enter a stop (name or ID), or a route #.", "bad");
         return;
       }
 
       if (isStopId(stopSpec)) {
+        const allStops = await getStops();
+        const match = allStops.find((s) => s?.sc === stopSpec);
         setStatus(`Using stop ID ${stopSpec}.`, "ok");
-        renderStopOptions([{ sc: stopSpec, sn: "(manual stop ID)", la: null, lo: null }]);
+        renderStopOptions([{ sc: stopSpec, sn: match?.sn || "(stop ID)", la: null, lo: null }]);
         return;
       }
 
@@ -461,8 +689,6 @@
         setStatus("Type at least 2 characters for stop name.", "bad");
         return;
       }
-
-      const routeNoLower = routeNo.toLowerCase();
 
       const allStops = await getStops();
       const nameMatches = allStops
@@ -478,6 +704,18 @@
         return;
       }
 
+      // Stop-only mode: just show name matches.
+      if (!routeNo) {
+        const maxToShow = 60;
+        const toShow = nameMatches.slice(0, maxToShow);
+        setStatus(`Found ${nameMatches.length} matching stop(s). Showing ${toShow.length}.`, "ok");
+        renderStopOptions(toShow);
+        return;
+      }
+
+      // Stop+route mode: filter by route service at the stop.
+      const routeNoNormalized = normalizeRouteForCompare(routeNo);
+
       // Cap how many we route-check to keep it responsive.
       const maxToCheck = 40;
       const toCheck = nameMatches.slice(0, maxToCheck);
@@ -485,8 +723,7 @@
       setStatus(`Found ${nameMatches.length} name matches. Checking route ${routeNo} for up to ${toCheck.length} stops...`);
       let lastShown = 0;
 
-      const filtered = await filterByRouteWithConcurrency(toCheck, routeNoLower, (done) => {
-        // update at ~10% increments
+      const filtered = await filterByRouteWithConcurrency(toCheck, routeNoNormalized, (done) => {
         const pct = Math.floor((done / toCheck.length) * 100);
         if (pct - lastShown >= 10 || done === toCheck.length) {
           lastShown = pct;
@@ -494,7 +731,6 @@
         }
       });
 
-      // If filtering produces nothing, show unfiltered list (but keep it capped).
       if (filtered.length === 0) {
         setStatus(`No matches verified on route ${routeNo}. Showing name matches (first ${toCheck.length}).`, "bad");
         renderStopOptions(toCheck);
@@ -508,14 +744,30 @@
     async function getRealtime() {
       clearResults();
 
+      const stopSpec = stopSpecEl.value.trim();
       const routeNo = routeNoEl.value.trim();
       const selectedStopId = stopSelectEl.value;
-      if (!routeNo || !selectedStopId) {
-        setStatus("Pick a stop and enter a route #.", "bad");
+
+      // Route-only mode
+      if (!stopSpec && routeNo) {
+        await showRouteStops(routeNo);
         return;
       }
 
-      const url = `https://getaway.translink.ca/api/gtfs/stop/${encodeURIComponent(selectedStopId)}/route/${encodeURIComponent(routeNo)}/realtimeschedules?querySize=6`;
+      // Stop-only mode
+      if (!routeNo && selectedStopId) {
+        await showRoutesAtStop(selectedStopId);
+        return;
+      }
+
+      // Stop+route mode
+      if (!routeNo || !selectedStopId) {
+        setStatus("Pick a stop and enter a route # (or leave one blank for single-parameter mode).", "bad");
+        return;
+      }
+
+      const routeApi = formatRouteForApi(routeNo);
+      const url = `https://getaway.translink.ca/api/gtfs/stop/${encodeURIComponent(selectedStopId)}/route/${encodeURIComponent(routeApi)}/realtimeschedules?querySize=6`;
 
       setStatus(`Fetching realtime for stop ${selectedStopId}, route ${routeNo}...`);
       const json = await fetchJson(url);
@@ -530,6 +782,7 @@
       const trips = route?.t || [];
 
       setInfoRows([
+        ["Mode", "Stop+route"],
         ["Stop", stop?.sn || ""],
         ["Route", `${route?.rs || ""} ${route?.rl || ""}`.trim()],
         ["Destination", route?.dn || ""],
@@ -571,9 +824,9 @@
       stopSpecEl.value = "";
       routeNoEl.value = "";
       stopSelectEl.innerHTML = "";
-      realtimeBtn.disabled = true;
       clearResults();
       setStatus("");
+      updateButtons();
     }
 
     searchBtn.addEventListener("click", () => {
@@ -586,6 +839,10 @@
 
     clearBtn.addEventListener("click", clearAll);
 
+    stopSelectEl.addEventListener("change", updateButtons);
+    stopSpecEl.addEventListener("input", updateButtons);
+    routeNoEl.addEventListener("input", updateButtons);
+
     stopSpecEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter") searchBtn.click();
     });
@@ -593,6 +850,8 @@
     routeNoEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter") searchBtn.click();
     });
+
+    updateButtons();
   </script>
 </body>
 </html>
