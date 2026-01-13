@@ -237,13 +237,16 @@
           </div>
           <div>
             <label for="routeNo">Route #</label>
-            <input id="routeNo" placeholder="e.g. 7 (leave blank for stop-only)" autocomplete="off" />
+            <input id="routeNo" list="routeList" placeholder="e.g. 7 (leave blank for stop-only)" autocomplete="off" />
+            <datalist id="routeList"></datalist>
+            <div class="hint" id="routeHint" style="margin-top: 6px;"></div>
           </div>
         </div>
 
         <div class="btnrow">
           <button id="searchBtn">Search</button>
           <button id="realtimeBtn" disabled>Fetch</button>
+          <button id="nearbyBtn" type="button">Nearby (GPS)</button>
           <button id="clearBtn" type="button">Clear</button>
         </div>
 
@@ -253,7 +256,7 @@
         <select id="stopSelect" size="10"></select>
 
         <footer>
-          Tip: Try 2+ words like <span class="mono">Westbound Yew</span>. Leave one field blank for single-parameter mode.
+          Tip: Use <span class="mono">Nearby (GPS)</span> to list stops near you. Leave one field blank for single-parameter mode.
         </footer>
       </section>
 
@@ -281,8 +284,11 @@
     const routeNoEl = document.getElementById("routeNo");
     const searchBtn = document.getElementById("searchBtn");
     const realtimeBtn = document.getElementById("realtimeBtn");
+    const nearbyBtn = document.getElementById("nearbyBtn");
     const clearBtn = document.getElementById("clearBtn");
     const stopSelectEl = document.getElementById("stopSelect");
+    const routeListEl = document.getElementById("routeList");
+    const routeHintEl = document.getElementById("routeHint");
     const statusEl = document.getElementById("status");
     const infoEl = document.getElementById("info");
     const departuresEl = document.getElementById("departures");
@@ -324,6 +330,39 @@
         .map((t) => t.trim())
         .filter((t) => t.length > 1);
       return Array.from(new Set(tokens));
+    }
+
+    function haversineMeters(lat1, lon1, lat2, lon2) {
+      const toRad = (d) => (d * Math.PI) / 180;
+      const R = 6371000;
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    function optionTextToStopName(text) {
+      const raw = String(text || "").trim();
+      if (!raw) return "";
+
+      // Expected formats:
+      // - "60574 — Westbound W 4th Ave @ Yew St"
+      // - "60574 — Westbound W 4th Ave @ Yew St (123m)"
+      const parts = raw.split(/\s+—\s+/);
+      const rhs = parts.length >= 2 ? parts.slice(1).join(" — ") : raw;
+      return rhs.replace(/\s*\(\d+m\)\s*$/, "").trim();
+    }
+
+    function getCurrentPosition(options) {
+      return new Promise((resolve, reject) => {
+        if (!navigator.geolocation) {
+          reject(new Error("Geolocation is not supported in this browser."));
+          return;
+        }
+        navigator.geolocation.getCurrentPosition(resolve, reject, options);
+      });
     }
 
     async function fetchJson(url) {
@@ -381,6 +420,65 @@
       return routes;
     }
 
+    function clearRouteSuggestions() {
+      routeListEl.innerHTML = "";
+      routeHintEl.textContent = "";
+    }
+
+    function renderRouteSuggestions(routes) {
+      routeListEl.innerHTML = "";
+
+      if (!Array.isArray(routes) || routes.length === 0) {
+        routeHintEl.textContent = "";
+        return;
+      }
+
+      const uniq = new Map();
+      for (const r of routes) {
+        const key = normalizeRouteForCompare(r?.rs || "");
+        if (!key) continue;
+        if (!uniq.has(key)) uniq.set(key, r);
+      }
+
+      const list = Array.from(uniq.values()).sort((a, b) => {
+        const aa = normalizeRouteForCompare(a?.rs || "");
+        const bb = normalizeRouteForCompare(b?.rs || "");
+        const aNum = /^\d+$/.test(aa) ? Number(aa) : NaN;
+        const bNum = /^\d+$/.test(bb) ? Number(bb) : NaN;
+        if (!Number.isNaN(aNum) && !Number.isNaN(bNum)) return aNum - bNum;
+        return String(aa).localeCompare(String(bb));
+      });
+
+      for (const r of list) {
+        const opt = document.createElement("option");
+        opt.value = normalizeRouteForCompare(r?.rs || "");
+        opt.textContent = `${r?.rs || ""} ${r?.rl || ""}`.trim();
+        routeListEl.appendChild(opt);
+      }
+
+      const preview = list
+        .slice(0, 12)
+        .map((r) => normalizeRouteForCompare(r?.rs || ""))
+        .filter(Boolean)
+        .join(", ");
+
+      routeHintEl.textContent = `Routes at this stop: ${preview}${list.length > 12 ? "…" : ""}`;
+    }
+
+    async function refreshRouteSuggestionsForStop(stopId) {
+      if (!stopId) {
+        clearRouteSuggestions();
+        return;
+      }
+
+      try {
+        const routes = await getRoutesForStop(stopId);
+        renderRouteSuggestions(routes);
+      } catch {
+        clearRouteSuggestions();
+      }
+    }
+
     async function stopHasRoute(stopId, routeNoNormalized) {
       const routes = await getRoutesForStop(stopId);
       return (
@@ -429,6 +527,14 @@
       departuresEl.innerHTML = "";
     }
 
+    function applySelectedStopToInput() {
+      const opt = stopSelectEl.options[stopSelectEl.selectedIndex];
+      if (!opt) return;
+      const stopName = optionTextToStopName(opt.textContent);
+      stopSpecEl.value = stopName || opt.value || "";
+      updateButtons();
+    }
+
     function setInfoRows(rows) {
       infoEl.innerHTML = "";
       for (const [k, v] of rows) {
@@ -453,6 +559,68 @@
         stopSelectEl.selectedIndex = 0;
       }
       updateButtons();
+
+      const selectedStopId = stopSelectEl.value;
+      refreshRouteSuggestionsForStop(selectedStopId);
+    }
+
+    async function showNearbyStops() {
+      clearResults();
+      stopSelectEl.innerHTML = "";
+      updateButtons();
+
+      setStatus("Requesting GPS location...");
+
+      let pos;
+      try {
+        pos = await getCurrentPosition({ enableHighAccuracy: false, timeout: 8000, maximumAge: 30000 });
+      } catch (e) {
+        const code = e?.code;
+        const msg =
+          code === 1
+            ? "Location permission denied."
+            : code === 2
+              ? "Location unavailable."
+              : code === 3
+                ? "Location request timed out."
+                : String(e?.message || e);
+        setStatus(msg, "bad");
+        return;
+      }
+
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+
+      setStatus("Finding nearby stops...");
+      const allStops = await getStops();
+
+      const nearby = allStops
+        .filter((s) => typeof s?.la === "number" && typeof s?.lo === "number")
+        .map((s) => ({
+          ...s,
+          _dist: haversineMeters(lat, lon, s.la, s.lo),
+        }))
+        .filter((s) => s._dist <= 600)
+        .sort((a, b) => a._dist - b._dist)
+        .slice(0, 25);
+
+      if (nearby.length === 0) {
+        setStatus("No stops found within ~600m. Try searching by name.", "bad");
+        return;
+      }
+
+      stopSelectEl.innerHTML = "";
+      for (const s of nearby) {
+        const opt = document.createElement("option");
+        opt.value = s.sc;
+        opt.textContent = `${s.sc} — ${s.sn} (${Math.round(s._dist)}m)`;
+        stopSelectEl.appendChild(opt);
+      }
+
+      stopSelectEl.selectedIndex = 0;
+      setStatus(`Found ${nearby.length} nearby stop(s).`, "ok");
+      updateButtons();
+      refreshRouteSuggestionsForStop(stopSelectEl.value);
     }
 
     function updateButtons() {
@@ -824,6 +992,7 @@
       stopSpecEl.value = "";
       routeNoEl.value = "";
       stopSelectEl.innerHTML = "";
+      clearRouteSuggestions();
       clearResults();
       setStatus("");
       updateButtons();
@@ -837,10 +1006,35 @@
       getRealtime().catch((e) => setStatus(String(e?.message || e), "bad"));
     });
 
+    nearbyBtn.addEventListener("click", () => {
+      showNearbyStops().catch((e) => setStatus(String(e?.message || e), "bad"));
+    });
+
     clearBtn.addEventListener("click", clearAll);
 
-    stopSelectEl.addEventListener("change", updateButtons);
-    stopSpecEl.addEventListener("input", updateButtons);
+    stopSelectEl.addEventListener("change", () => {
+      updateButtons();
+      refreshRouteSuggestionsForStop(stopSelectEl.value);
+    });
+
+    stopSelectEl.addEventListener("dblclick", () => {
+      applySelectedStopToInput();
+      stopSpecEl.focus();
+    });
+
+    let stopIdSuggestTimer = null;
+    stopSpecEl.addEventListener("input", () => {
+      updateButtons();
+
+      const stopSpec = stopSpecEl.value.trim();
+      if (!isStopId(stopSpec)) return;
+
+      if (stopIdSuggestTimer) window.clearTimeout(stopIdSuggestTimer);
+      stopIdSuggestTimer = window.setTimeout(() => {
+        refreshRouteSuggestionsForStop(stopSpec);
+      }, 250);
+    });
+
     routeNoEl.addEventListener("input", updateButtons);
 
     stopSpecEl.addEventListener("keydown", (e) => {
@@ -850,8 +1044,16 @@
     routeNoEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter") searchBtn.click();
     });
-
     updateButtons();
+
+    // Best-effort default stop list from GPS.
+    // Geolocation often requires https:// or localhost, and may require user interaction.
+    if (window.isSecureContext && navigator.geolocation) {
+      showNearbyStops().catch(() => {
+        // ignore; user can click Nearby (GPS)
+      });
+    }
+
   </script>
 </body>
 </html>
