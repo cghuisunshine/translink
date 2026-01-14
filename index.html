@@ -569,6 +569,16 @@
       stopSelectEl.innerHTML = "";
       updateButtons();
 
+      // On iOS Safari (and most browsers), Geolocation requires a secure context.
+      // If served over plain http:// (or opened as file://), the browser can treat it as denied.
+      if (!window.isSecureContext) {
+        setStatus(
+          "Nearby (GPS) needs HTTPS (or localhost). Open this page via https:// (not file:// or http://).",
+          "bad"
+        );
+        return;
+      }
+
       setStatus("Requesting GPS location...");
 
       let pos;
@@ -578,11 +588,11 @@
         const code = e?.code;
         const msg =
           code === 1
-            ? "Location permission denied."
+            ? "Location permission denied (check iPhone Settings → Privacy & Security → Location Services → Safari Websites)."
             : code === 2
-              ? "Location unavailable."
+              ? "Location unavailable (try again outdoors / with better signal)."
               : code === 3
-                ? "Location request timed out."
+                ? "Location request timed out (try again)."
                 : String(e?.message || e);
         setStatus(msg, "bad");
         return;
@@ -783,7 +793,17 @@
 
           try {
             const json = await fetchJson(url);
-            times = json?.[0]?.r?.[0]?.t?.map((t) => t?.dt).filter(Boolean) || [];
+            const stop = json?.[0];
+            const groups = Array.isArray(stop?.r) ? stop.r : [];
+            const trips = groups
+              .flatMap((g) => g?.t || [])
+              .filter(Boolean)
+              .sort((a, b) => {
+                const au = typeof a?.ut === "number" ? a.ut : Number.POSITIVE_INFINITY;
+                const bu = typeof b?.ut === "number" ? b.ut : Number.POSITIVE_INFINITY;
+                return au - bu;
+              });
+            times = trips.map((t) => t?.dt).filter(Boolean).slice(0, 3);
           } catch {
             noRealtime = true;
           }
@@ -946,18 +966,43 @@
       }
 
       const stop = json[0];
-      const route = stop?.r?.[0];
-      const trips = route?.t || [];
+      const routeGroups = Array.isArray(stop?.r) ? stop.r : [];
+      const primaryGroup = routeGroups[0] || {};
+
+      // The API can return multiple route groups (patterns) for the same route.
+      // Always sort by unix time so we show actually-upcoming buses first.
+      const tripItems = routeGroups
+        .flatMap((g, groupIndex) =>
+          (g?.t || []).map((t) => ({
+            ...t,
+            _groupIndex: groupIndex,
+            _rs: g?.rs,
+            _rl: g?.rl,
+            _dn: g?.dn,
+            _di: g?.di,
+          }))
+        )
+        .filter((t) => t && (t.dt || t.ut));
+
+      tripItems.sort((a, b) => {
+        const au = typeof a?.ut === "number" ? a.ut : Number.POSITIVE_INFINITY;
+        const bu = typeof b?.ut === "number" ? b.ut : Number.POSITIVE_INFINITY;
+        return au - bu;
+      });
+
+      const uniqueDestinations = Array.from(
+        new Set(routeGroups.map((g) => (g?.dn || "").trim()).filter(Boolean))
+      );
 
       setInfoRows([
         ["Mode", "Stop+route"],
         ["Stop", stop?.sn || ""],
-        ["Route", `${route?.rs || ""} ${route?.rl || ""}`.trim()],
-        ["Destination", route?.dn || ""],
+        ["Route", `${primaryGroup?.rs || ""} ${primaryGroup?.rl || ""}`.trim()],
+        ["Destination", uniqueDestinations.join(" / ")],
       ]);
 
       departuresEl.innerHTML = "";
-      for (const t of trips) {
+      for (const t of tripItems) {
         const li = document.createElement("li");
 
         const top = document.createElement("div");
@@ -977,7 +1022,8 @@
         meta.className = "muted";
         const delay = typeof t?.dl === "number" ? `${t.dl}s` : "";
         const rt = typeof t?.rt === "boolean" ? (t.rt ? "realtime" : "scheduled") : "";
-        meta.textContent = [delay && `delay ${delay}`, rt].filter(Boolean).join(" · ");
+        const dir = typeof t?._di === "number" ? `dir ${t._di}` : "";
+        meta.textContent = [delay && `delay ${delay}`, rt, dir].filter(Boolean).join(" · ");
 
         li.appendChild(top);
         if (meta.textContent) li.appendChild(meta);
